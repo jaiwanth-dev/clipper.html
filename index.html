@@ -372,7 +372,6 @@ const S = {
   processing: false,
   ytData: null,
   activeTab: 'file',
-  audioCtx: null,
 };
 
 const HOOKS = [
@@ -617,27 +616,21 @@ function setProgress(pct, lbl) {
   document.getElementById('progPct').textContent = Math.round(pct)+'%';
 }
 function computeSegments(duration, nClips, maxLen) {
-  const minLen = 20, segs = [], used = [], res = 0.5, nW = Math.floor(duration/res), energy = [];
-  for (let i=0;i<nW;i++) {
-    const t=i/nW, base=0.35+0.2*Math.sin(t*Math.PI*3);
-    energy.push(Math.min(1, base + Math.random()*0.25 + (i%Math.floor(nW/(nClips+1))<6 ? Math.random()*0.35 : 0)));
+  // Evenly distribute clips across full video — guarantees exactly nClips, covers whole video
+  const minLen = Math.min(15, maxLen);
+  const clipLen = Math.min(maxLen, Math.max(minLen, Math.floor(duration / nClips)));
+  const step = duration / nClips;
+  const segs = [];
+  for (let i = 0; i < nClips; i++) {
+    const jitter = (Math.sin(i * 2.7) * 0.15 + Math.cos(i * 1.3) * 0.1) * step * 0.3;
+    let start = Math.max(0, Math.min(duration - minLen, i * step + jitter));
+    let end = Math.min(duration, start + clipLen);
+    if (end - start < minLen) { end = Math.min(duration, start + minLen); }
+    if (end - start < minLen) { start = Math.max(0, end - minLen); }
+    const energy = 0.45 + 0.4 * Math.abs(Math.sin(i * 1.9 + 0.5));
+    segs.push({ start: Math.round(start * 10) / 10, end: Math.round(end * 10) / 10, energy });
   }
-  const peaks = [];
-  for (let i=2;i<nW-2;i++) if (energy[i]>energy[i-1]&&energy[i]>energy[i+1]&&energy[i]>energy[i-2]&&energy[i]>energy[i+2]) peaks.push({t:i*res,e:energy[i]});
-  peaks.sort((a,b)=>b.e-a.e);
-  if (peaks.length < nClips) {
-    const step = duration/(nClips+1);
-    for (let k=1;k<=nClips;k++) { const t=k*step; peaks.push({t,e:energy[Math.min(nW-1,Math.floor(t/res))]||0.5}); }
-    peaks.sort((a,b)=>b.e-a.e);
-  }
-  for (const peak of peaks) {
-    if (segs.length >= nClips) break;
-    const clipLen = Math.round(minLen+(maxLen-minLen)*peak.e);
-    let start = Math.max(0,peak.t-clipLen*0.3), end = Math.min(duration,start+clipLen); start = Math.max(0,end-clipLen);
-    if (used.some(([s,e])=>!(end<s-10||start>e+10))) continue;
-    segs.push({start:Math.round(start*10)/10,end:Math.round(end*10)/10,energy:peak.e}); used.push([start,end]);
-  }
-  segs.sort((a,b)=>a.start-b.start); return segs;
+  return segs;
 }
 function scoreSegment(energy, posRatio, idx, total) {
   return Math.min(99, Math.round(50 + energy*44 + Math.max(0,10-Math.abs(posRatio-0.4)*18) + Math.max(0,(total-idx)/total*7)));
@@ -684,138 +677,236 @@ async function getAITitles(segments, totalDuration, videoTitle) {
   } catch(e) { console.warn('AI titles failed:', e); return []; }
 }
 
-// ── AUDIO-AWARE SEGMENT EXTRACTION ────────────────────────────────────────────
-// FIX: captures BOTH video (canvas) and audio (Web Audio API) tracks,
-// combines them into a single MediaStream, records with MediaRecorder.
-function extractSegment(file, startSec, endSec) {
+// ── SEGMENT EXTRACTION ────────────────────────────────────────────────────────
+function extractSegment(file, startSec, endSec, subtitles) {
   return new Promise((resolve) => {
     const duration = endSec - startSec;
+    // Use same object URL for all clips — don't revoke until done
     const videoURL = URL.createObjectURL(file);
 
-    // Hidden video element — must be in DOM for captureStream()
+    // MUST be opacity:0 not visibility:hidden — browsers throttle canvas draws
+    // from elements that are visibility:hidden or off-screen
     const vid = document.createElement('video');
     vid.src = videoURL;
-    vid.muted = false;          // We need audio output
+    vid.muted = false;
     vid.volume = 1;
     vid.playsInline = true;
-    vid.crossOrigin = 'anonymous';
-    vid.style.cssText = 'position:fixed;left:-9999px;top:0;width:320px;height:180px;visibility:hidden;pointer-events:none;';
+    vid.preload = 'auto';
+    vid.style.cssText = 'position:fixed;left:1px;top:1px;width:2px;height:2px;opacity:0.01;pointer-events:none;z-index:9999;';
     document.body.appendChild(vid);
 
-    // 9:16 canvas for video track
+    const CW = 720, CH = 1280;
     const canvas = document.createElement('canvas');
-    canvas.width = 720; canvas.height = 1280;
-    const ctx = canvas.getContext('2d');
+    canvas.width = CW; canvas.height = CH;
+    const ctx = canvas.getContext('2d', { alpha: false });
 
-    let rec = null, rafId = null, done = false;
+    let rec = null, rafId = null, done = false, recording = false;
     let audioCtx = null, sourceNode = null, destNode = null;
 
-    const TIMEOUT = Math.max(90000, duration * 4000);
-    const timer = setTimeout(() => { if (!done) { done = true; stopAll(); } }, TIMEOUT);
+    const TIMEOUT = Math.max(30000, duration * 1500 + 8000);
+    const timer = setTimeout(() => { if (!done) { done = true; stopRec(); } }, TIMEOUT);
 
     const cleanup = () => {
       cancelAnimationFrame(rafId);
-      try { sourceNode && sourceNode.disconnect(); } catch(e) {}
-      try { destNode && destNode.disconnect(); } catch(e) {}
-      try { audioCtx && audioCtx.state !== 'closed' && audioCtx.close(); } catch(e) {}
-      try { vid.pause(); } catch(e) {}
-      try { document.body.removeChild(vid); } catch(e) {}
+      rafId = null;
+      try { sourceNode && sourceNode.disconnect(); } catch(_) {}
+      try { destNode && destNode.disconnect(); } catch(_) {}
+      try { if (audioCtx && audioCtx.state !== 'closed') audioCtx.close(); } catch(_) {}
+      try { vid.pause(); vid.src = ''; } catch(_) {}
+      try { if (vid.parentNode) document.body.removeChild(vid); } catch(_) {}
       URL.revokeObjectURL(videoURL);
     };
 
     const finalize = (blob) => {
+      if (done && !recording) return; // prevent double-call
+      recording = false;
       clearTimeout(timer);
       cleanup();
-      resolve(blob && blob.size > 2000 ? blob : null);
+      resolve(blob && blob.size > 10000 ? blob : null);
     };
 
-    const stopAll = () => {
+    const stopRec = () => {
       try {
-        if (rec && rec.state !== 'inactive') rec.stop();
-        else finalize(null);
+        if (rec && rec.state !== 'inactive') { rec.stop(); }
+        else { finalize(null); }
       } catch(e) { finalize(null); }
     };
 
+    // Subtitle lookup — clamps to last line at end to avoid blank gap
+    const getSubText = (relT) => {
+      if (!subtitles || !subtitles.length) return '';
+      // Clamp to clip duration
+      const t = Math.min(relT, duration - 0.01);
+      for (const s of subtitles) {
+        if (t >= s.startSec && t < s.endSec + 0.1) return s.text;
+      }
+      return subtitles[subtitles.length - 1].text;
+    };
+
+    // Polyfilled rounded rect — roundRect not in all browsers
+    const fillRoundRect = (x, y, w, h, r) => {
+      r = Math.min(r, w / 2, h / 2);
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + w - r, y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+      ctx.lineTo(x + w, y + h - r);
+      ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+      ctx.lineTo(x + r, y + h);
+      ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+      ctx.lineTo(x, y + r);
+      ctx.quadraticCurveTo(x, y, x + r, y);
+      ctx.closePath();
+      ctx.fill();
+    };
+
+    const drawSubtitle = (text) => {
+      if (!text) return;
+      const fontSize = Math.round(CW * 0.065);
+      ctx.font = `bold ${fontSize}px Arial, sans-serif`; // Arial always available, no loading delay
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'alphabetic';
+
+      // Word-wrap
+      const maxW = CW * 0.85;
+      const words = text.split(' ');
+      const lines = [];
+      let cur = '';
+      for (const w of words) {
+        const test = cur ? cur + ' ' + w : w;
+        if (ctx.measureText(test).width > maxW && cur) { lines.push(cur); cur = w; }
+        else cur = test;
+      }
+      if (cur) lines.push(cur);
+
+      const lineH = fontSize * 1.3;
+      const totalH = lines.length * lineH + 10;
+      const baseY = CH * 0.86;
+
+      // Semi-transparent black backdrop
+      ctx.fillStyle = 'rgba(0,0,0,0.72)';
+      const bx = CW * 0.05, bw = CW * 0.9;
+      fillRoundRect(bx, baseY - totalH - 8, bw, totalH + 16, 10);
+
+      // Draw each line: stroke then fill
+      lines.forEach((l, idx) => {
+        const y = baseY - (lines.length - 1 - idx) * lineH;
+        ctx.lineWidth = Math.round(fontSize * 0.13);
+        ctx.strokeStyle = '#000000';
+        ctx.lineJoin = 'round';
+        ctx.strokeText(l, CW / 2, y);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(l, CW / 2, y);
+      });
+    };
+
+    let frameCount = 0;
     const drawFrame = () => {
       if (done) return;
       try {
-        const vw = vid.videoWidth || 320, vh = vid.videoHeight || 180;
-        const targetAR = 9 / 16, srcAR = vw / vh;
-        let sx = 0, sy = 0, sw = vw, sh = vh;
-        if (srcAR > targetAR) { sw = Math.round(vh * targetAR); sx = Math.round((vw - sw) / 2); }
-        else { sh = Math.round(vw / targetAR); sy = Math.round((vh - sh) / 2); }
-        ctx.drawImage(vid, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+        if (vid.readyState >= 2) { // HAVE_CURRENT_DATA or better
+          const vw = vid.videoWidth, vh = vid.videoHeight;
+          if (vw > 0 && vh > 0) {
+            const srcAR = vw / vh, dstAR = 9 / 16;
+            let sx = 0, sy = 0, sw = vw, sh = vh;
+            if (srcAR > dstAR) { sw = Math.round(vh * dstAR); sx = Math.round((vw - sw) / 2); }
+            else { sh = Math.round(vw / dstAR); sy = Math.round((vh - sh) / 2); }
+            ctx.drawImage(vid, sx, sy, sw, sh, 0, 0, CW, CH);
+            frameCount++;
+          }
+        }
       } catch(e) {}
+
+      // Always draw subtitle on top
+      const relTime = Math.max(0, vid.currentTime - startSec);
+      drawSubtitle(getSubText(relTime));
+
       rafId = requestAnimationFrame(drawFrame);
     };
 
-    vid.addEventListener('loadedmetadata', () => {
-      vid.currentTime = Math.min(startSec, vid.duration - 0.1);
-    });
+    // Use canplaythrough to ensure video is buffered before seeking
+    const onReady = () => {
+      vid.removeEventListener('canplay', onReady);
+      vid.removeEventListener('loadeddata', onReady);
+      // Seek to start position
+      vid.currentTime = Math.min(startSec, Math.max(0, vid.duration - 0.5));
+    };
+    vid.addEventListener('canplay', onReady, { once: true });
+    vid.addEventListener('loadeddata', onReady, { once: true });
 
     vid.addEventListener('seeked', () => {
-      if (done) return;
+      if (done || recording) return;
+      recording = true;
       try {
-        // ── Audio capture via Web Audio API ──────────────────────────────
-        // Reuse shared AudioContext to avoid "too many contexts" error
-        if (!S.audioCtx || S.audioCtx.state === 'closed') {
-          S.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        // Fresh AudioContext per clip
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 44100 });
+
+        const resumeAndStart = () => {
+          try {
+            sourceNode = audioCtx.createMediaElementSource(vid);
+            destNode   = audioCtx.createMediaStreamDestination();
+            sourceNode.connect(destNode);
+            sourceNode.connect(audioCtx.destination); // hear it locally too
+
+            const audioTrack = destNode.stream.getAudioTracks()[0];
+            const canvasStream = canvas.captureStream(25);
+            const videoTrack  = canvasStream.getVideoTracks()[0];
+
+            const combined = new MediaStream();
+            if (videoTrack) combined.addTrack(videoTrack);
+            if (audioTrack) combined.addTrack(audioTrack);
+
+            const mimes = [
+              'video/webm;codecs=vp9,opus',
+              'video/webm;codecs=vp8,opus',
+              'video/webm;codecs=vp9',
+              'video/webm;codecs=vp8',
+              'video/webm'
+            ];
+            const mime = mimes.find(m => { try { return MediaRecorder.isTypeSupported(m); } catch(_) { return false; } }) || 'video/webm';
+
+            const chunks = [];
+            rec = new MediaRecorder(combined, { mimeType: mime, videoBitsPerSecond: 2800000 });
+            rec.ondataavailable = ev => { if (ev.data && ev.data.size > 0) chunks.push(ev.data); };
+            rec.onstop = () => { done = true; finalize(new Blob(chunks, { type: mime })); };
+            rec.onerror = () => { done = true; finalize(null); };
+
+            // Start drawing frames BEFORE recording begins
+            drawFrame();
+            rec.start(150);
+
+            vid.play().then(() => {
+              // Schedule stop at end of clip
+              setTimeout(() => { if (!done) { done = true; vid.pause(); stopRec(); } }, duration * 1000 + 500);
+            }).catch(err => {
+              console.warn('[ClipAI] play() failed:', err);
+              done = true; finalize(null);
+            });
+
+          } catch(e) {
+            console.warn('[ClipAI] stream setup failed:', e);
+            done = true; finalize(null);
+          }
+        };
+
+        if (audioCtx.state === 'suspended') {
+          audioCtx.resume().then(resumeAndStart).catch(() => { done = true; finalize(null); });
+        } else {
+          resumeAndStart();
         }
-        audioCtx = S.audioCtx;
-
-        // Resume if suspended (autoplay policy)
-        if (audioCtx.state === 'suspended') audioCtx.resume();
-
-        sourceNode = audioCtx.createMediaElementSource(vid);
-        destNode   = audioCtx.createMediaStreamDestination();
-        sourceNode.connect(destNode);
-        sourceNode.connect(audioCtx.destination); // also play locally so vid isn't silent
-
-        const audioTrack = destNode.stream.getAudioTracks()[0];
-
-        // ── Video capture from canvas ─────────────────────────────────────
-        const videoStream = canvas.captureStream(25);
-        const videoTrack  = videoStream.getVideoTracks()[0];
-
-        // ── Combined stream ───────────────────────────────────────────────
-        const combinedStream = new MediaStream();
-        if (videoTrack) combinedStream.addTrack(videoTrack);
-        if (audioTrack) combinedStream.addTrack(audioTrack);
-
-        // Pick best supported codec
-        const mimes = [
-          'video/webm;codecs=vp9,opus',
-          'video/webm;codecs=vp8,opus',
-          'video/webm;codecs=vp9',
-          'video/webm;codecs=vp8',
-          'video/webm',
-        ];
-        const mime = mimes.find(m => { try { return MediaRecorder.isTypeSupported(m); } catch(e) { return false; } }) || 'video/webm';
-
-        const chunks = [];
-        rec = new MediaRecorder(combinedStream, { mimeType: mime, videoBitsPerSecond: 2500000 });
-        rec.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
-        rec.onstop = () => { done = true; finalize(new Blob(chunks, { type: mime })); };
-        rec.onerror = () => { done = true; finalize(null); };
-
-        drawFrame();
-        rec.start(200);
-
-        vid.play().catch(e => {
-          // Autoplay blocked — resume AudioContext and retry
-          audioCtx.resume().then(() => vid.play().catch(() => {}));
-        });
-
-        // Stop after clip duration
-        setTimeout(() => { if (!done) { done = true; vid.pause(); stopAll(); } }, duration * 1000 + 800);
 
       } catch(e) {
-        console.warn('[ClipAI] recorder setup failed:', e);
+        console.warn('[ClipAI] AudioContext failed:', e);
         done = true; finalize(null);
       }
     }, { once: true });
 
-    vid.addEventListener('error', () => { done = true; clearTimeout(timer); finalize(null); });
+    vid.addEventListener('error', (e) => {
+      console.warn('[ClipAI] video error:', e);
+      done = true; clearTimeout(timer); cleanup(); resolve(null);
+    });
+
+    vid.load();
   });
 }
 
@@ -825,53 +916,103 @@ async function startPipeline() {
   if (S.videoMeta?.fromYT && !S.file) return startYTPipeline();
   if (!S.file) return;
   S.processing = true;
+
+  // Revoke any old clip URLs to free memory
+  S.clips.forEach(c => { try { if (c.clipUrl) URL.revokeObjectURL(c.clipUrl); } catch(_) {} });
+  S.clips = [];
+
   const btn = document.getElementById('analyzeBtn');
   btn.disabled = true;
   document.getElementById('btnShimmer').style.display = 'block';
   document.getElementById('btnTxt').textContent = 'Processing...';
   document.getElementById('progSec').style.display = 'block';
-  document.getElementById('progSteps').innerHTML = STEPS.map((s,i) => `<div class="pstep" id="pstep${i}"><div class="pdot"></div><span>${s}</span></div>`).join('');
+  document.getElementById('clipsGrid').innerHTML = '<div class="empty"><div class="empty-ico">⏳</div><div class="empty-title">Generating clips…</div><div class="empty-sub">This runs in real-time — each clip plays through before being saved.</div></div>';
+
+  const STEP_LABELS = [
+    'Reading video metadata',
+    'Planning clip segments',
+    'Generating AI titles',
+    'Scoring virality',
+    'Extracting clips (real-time)',
+    'Encoding subtitles',
+    'Finalizing 9:16 format',
+    'Complete',
+  ];
+  document.getElementById('progSteps').innerHTML = STEP_LABELS.map((s,i) =>
+    `<div class="pstep" id="pstep${i}"><div class="pdot"></div><span>${s}</span></div>`).join('');
+
   const nClips = parseInt(document.getElementById('sel-count').value);
   const maxLen  = parseInt(document.getElementById('clip-len').value);
+
   try {
-    setStep(0,'active'); setProgress(5,'Reading video metadata...'); await sleep(300); setStep(0,'done');
-    setStep(1,'active'); setProgress(12,'Analyzing audio energy peaks...');
-    const segments = computeSegments(S.videoMeta.duration, nClips, maxLen); await sleep(400); setStep(1,'done');
-    setStep(2,'active'); setProgress(20,'Running AI moment detection...');
-    const aiTitles = await getAITitles(segments, S.videoMeta.duration); setStep(2,'done');
-    setStep(3,'active'); setProgress(28,'Scoring virality...'); await sleep(300); setStep(3,'done');
-    setStep(4,'active'); setProgress(32,'Extracting clips with audio...');
+    setStep(0,'active'); setProgress(4,'Reading video metadata...'); await sleep(200); setStep(0,'done');
+
+    setStep(1,'active'); setProgress(10,'Planning clip segments...');
+    const segments = computeSegments(S.videoMeta.duration, nClips, maxLen);
+    await sleep(200); setStep(1,'done');
+
+    setStep(2,'active'); setProgress(16,'Generating AI titles...');
+    const aiTitles = await getAITitles(segments, S.videoMeta.duration);
+    setStep(2,'done');
+
+    setStep(3,'active'); setProgress(22,'Scoring virality...'); await sleep(150); setStep(3,'done');
+
+    setStep(4,'active'); setProgress(26,'Extracting clips…');
     const clips = [];
+
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
-      const pct = 32 + ((i / segments.length) * 58);
-      setProgress(pct, `Extracting clip ${i+1} of ${segments.length} (${fmtTime(seg.start)}–${fmtTime(seg.end)})…`);
-      document.querySelectorAll('.pstep')[4].querySelector('span').textContent = `Extracting clip ${i+1}/${segments.length}`;
-      let blob = null;
-      try { blob = await extractSegment(S.file, seg.start, seg.end); } catch(e) { console.warn('extract failed', e); }
+      const pct = 26 + ((i / segments.length) * 62);
+      setProgress(pct, `Clip ${i+1}/${segments.length}: ${fmtTime(seg.start)} → ${fmtTime(seg.end)}`);
+      document.querySelectorAll('.pstep')[4].querySelector('span').textContent =
+        `Extracting clip ${i+1}/${segments.length}`;
+
+      // Build clip metadata first so subtitles are ready for extraction
       const clip = buildClip(seg, i, segments.length, S.videoMeta, aiTitles[i], false);
-      if (blob && blob.size > 1000) { clip.clipBlob = blob; clip.clipUrl = URL.createObjectURL(blob); }
+
+      let blob = null;
+      try {
+        blob = await extractSegment(S.file, seg.start, seg.end, clip.subtitles);
+      } catch(e) {
+        console.warn('[ClipAI] extract failed for clip', i+1, e);
+      }
+
+      if (blob && blob.size > 10000) {
+        clip.clipBlob = blob;
+        clip.clipUrl  = URL.createObjectURL(blob);
+      }
+
       clips.push(clip);
-      S.clips = clips.slice(); renderClips(S.clips);
-      document.getElementById('clipBadge').textContent = clips.length + ' / ' + segments.length + ' clips';
+      S.clips = clips.slice();
+      renderClips(S.clips);
+      document.getElementById('clipBadge').textContent =
+        clips.length + ' / ' + segments.length + ' clips';
     }
+
     setStep(4,'done');
-    setStep(5,'active'); setProgress(92,'Burning subtitles & captions...'); await sleep(300); setStep(5,'done');
-    setStep(6,'active'); setProgress(96,'Rendering 9:16 vertical format...'); await sleep(200); setStep(6,'done');
-    setStep(7,'active'); setProgress(99,'Finalizing downloads...'); await sleep(200); setStep(7,'done');
-    setProgress(100,'Complete!');
-    S.clips = clips; renderClips(clips);
+    setStep(5,'active'); setProgress(90,'Encoding subtitles...'); await sleep(150); setStep(5,'done');
+    setStep(6,'active'); setProgress(96,'Finalizing...'); await sleep(100); setStep(6,'done');
+    setStep(7,'active'); setProgress(100,'Complete!'); setStep(7,'done');
+
+    S.clips = clips;
+    renderClips(clips);
     const readyCount = clips.filter(c => c.clipUrl).length;
     document.getElementById('clipBadge').textContent = clips.length + ' clips';
-    document.getElementById('exportAllBtn').disabled = false;
-    document.getElementById('exportAllBtn').textContent = '⬇ Export All (' + readyCount + ')';
-    setTimeout(() => selectClipById(clips[0].id), 300);
-    toast('✦ ' + readyCount + ' of ' + clips.length + ' clips extracted with audio!');
-  } catch(err) { toast('Error: ' + err.message, true); console.error(err); }
+    document.getElementById('exportAllBtn').disabled = readyCount === 0;
+    document.getElementById('exportAllBtn').textContent = `⬇ Export All (${readyCount})`;
+    if (clips.length > 0) setTimeout(() => selectClipById(clips[0].id), 300);
+    toast(`✦ ${readyCount}/${clips.length} clips ready with audio + subtitles!`);
+
+  } catch(err) {
+    toast('Error: ' + err.message, true);
+    console.error('[ClipAI] pipeline error:', err);
+  }
+
   btn.disabled = false;
   document.getElementById('btnShimmer').style.display = 'none';
   document.getElementById('btnTxt').textContent = 'Re-Analyze Video';
   S.processing = false;
+}
 }
 
 async function startYTPipeline() {
