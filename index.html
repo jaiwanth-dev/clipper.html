@@ -723,6 +723,7 @@ async function startPipeline() {
     renderClips(clips);
     document.getElementById('clipBadge').textContent = clips.length + ' clips';
     document.getElementById('exportAllBtn').disabled = false;
+    document.getElementById('exportAllBtn').textContent = '⬇ Export All (' + clips.length + ')';
     setTimeout(() => selectClip(0), 300);
     toast('✦ ' + clips.length + ' clips generated!');
   } catch(err) { toast('Error: ' + err.message, true); console.error(err); }
@@ -757,6 +758,7 @@ async function startYTPipeline() {
     renderClips(clips);
     document.getElementById('clipBadge').textContent = clips.length + ' clips (plan)';
     document.getElementById('exportAllBtn').disabled = false;
+    document.getElementById('exportAllBtn').textContent = '⬇ Export All (' + clips.length + ')';
     setTimeout(() => selectClip(0), 300);
     toast('✓ Clip plan ready! Download the video to export real clips.');
   } catch(err) { toast('Error: ' + err.message, true); }
@@ -780,14 +782,14 @@ function renderClips(clips) {
     const grad = GRADIENTS[i % GRADIENTS.length];
     const hasVideo = !!c.clipUrl;
     const ytBadge = c.isYTPlan ? `<div style="position:absolute;bottom:7px;left:0;right:0;text-align:center"><span style="background:rgba(0,0,0,.7);font-size:8px;color:#fbbf24;padding:2px 8px;border-radius:20px;border:1px solid rgba(251,191,36,.3)">📋 Plan only — upload file to export</span></div>` : '';
-    return `<div class="card" id="card${c.id}" onclick="selectClip(${i})">
+    return `<div class="card" id="card${c.id}" onclick="selectClipById(${c.id})">
       <div class="thumb">
         ${hasVideo ? `<video class="thumb-video" src="${c.clipUrl}" muted loop preload="metadata" style="width:100%;height:100%;object-fit:cover;position:absolute;inset:0"></video>`
           : `<div class="thumb-bg" style="background:${grad}"><div style="font-size:26px">${c.isYTPlan?'▶':'🎬'}</div><div>${c.start}–${c.end}</div></div>`}
         <div class="plat-badges">${plats}</div>
         <div class="score-pill"><span style="color:${sc}">●</span>${c.score}</div>
         ${ytBadge}
-        <div class="thumb-overlay"><button class="play-mini" onclick="event.stopPropagation();selectClip(${i})">▶</button></div>
+        <div class="thumb-overlay"><button class="play-mini" onclick="event.stopPropagation();selectClipById(${c.id})">▶</button></div>
       </div>
       <div class="card-info">
         <div class="card-title" title="${c.title}">${c.title}</div>
@@ -795,14 +797,24 @@ function renderClips(clips) {
         <div class="tags">${tags}</div>
       </div>
       <div class="card-actions">
-        <button class="ca-btn dl" onclick="event.stopPropagation();downloadClip(${i})" ${!hasVideo?'disabled title="Upload video file to download"':''}>⬇ ${c.isYTPlan?'Need file':'Download'}</button>
-        <button class="ca-btn" onclick="event.stopPropagation();selectClip(${i})">✎ Edit</button>
+        <button class="ca-btn dl" onclick="event.stopPropagation();downloadClipById(${c.id})" ${!hasVideo?'disabled title="Upload video file to download"':''}>⬇ ${c.isYTPlan?'Need file':'Download'}</button>
+        <button class="ca-btn" onclick="event.stopPropagation();selectClipById(${c.id})">✎ Edit</button>
       </div>
     </div>`;
   }).join('');
 }
 
 // ── SELECT + PREVIEW ───────────────────────────────────────────────────────────
+// Stable id-based lookups — survive sort reordering
+function selectClipById(id) {
+  const idx = S.clips.findIndex(c => c.id === id);
+  if (idx !== -1) selectClip(idx);
+}
+function downloadClipById(id) {
+  const idx = S.clips.findIndex(c => c.id === id);
+  if (idx !== -1) downloadClip(idx);
+}
+
 function selectClip(idx) {
   document.querySelectorAll('.card').forEach(c => c.classList.remove('sel'));
   const clip = S.clips[idx]; if (!clip) return;
@@ -891,34 +903,48 @@ async function regenImages() {
 // ── SORT / DOWNLOAD / EXPORT ───────────────────────────────────────────────────
 function sortClips(val) {
   if (!S.clips.length) return;
-  const sorted = [...S.clips].sort((a,b) => val==='score'?b.score-a.score:val==='duration'?b.durationSec-a.durationSec:a.id-b.id);
-  renderClips(sorted);
+  // Update S.clips in-place so all index references stay consistent
+  S.clips.sort((a,b) => val==='score'?b.score-a.score:val==='duration'?b.durationSec-a.durationSec:a.id-b.id);
+  renderClips(S.clips);
   if (S.selected) { const card=document.getElementById('card'+S.selected.id); if(card)card.classList.add('sel'); }
 }
 
 function downloadClip(idx) {
   const clip = S.clips[idx];
-  if (!clip || !clip.clipUrl) {
-    if (clip?.isYTPlan) { toast('Download the YouTube video first, then upload it here', true); switchTab('yt'); }
-    else toast('Clip not ready yet', true);
+  if (!clip) { toast('Clip not found', true); return; }
+  if (!clip.clipUrl) {
+    if (clip.isYTPlan) { toast('Download the YouTube video first, then upload it here', true); switchTab('yt'); }
+    else { toast('Upload a video file to generate downloadable clips', true); }
     return;
   }
   const ext = clip.clipBlob?.type?.includes('webm') ? '.webm' : '.mp4';
   const a = document.createElement('a');
   a.href = clip.clipUrl;
   a.download = `clipai_short_${String(clip.id).padStart(2,'0')}_${clip.score}score${ext}`;
+  document.body.appendChild(a);
   a.click();
+  document.body.removeChild(a);
   toast(`Downloading "${clip.title.slice(0,30)}..."`);
 }
 
 function exportAll() {
+  if (!S.clips.length) { toast('No clips generated yet', true); return; }
   const ready = S.clips.filter(c => c.clipUrl);
   if (!ready.length) {
-    if (S.clips.some(c=>c.isYTPlan)) { toast('Download the YouTube video first, then upload it to export clips', true); return; }
-    toast('No clips ready to export', true); return;
+    if (S.clips.some(c => c.isYTPlan)) {
+      toast('Upload the YouTube video file to export real clips', true); return;
+    }
+    toast('Upload a video file to generate downloadable clips', true); return;
   }
   let i = 0;
-  const dl = () => { if (i >= ready.length) { toast(`Exported ${ready.length} clips!`); return; } downloadClip(S.clips.indexOf(ready[i])); i++; setTimeout(dl, 800); };
+  const dl = () => {
+    if (i >= ready.length) { toast(`✓ Exported ${ready.length} clip${ready.length>1?'s':''}!`); return; }
+    const clip = ready[i];
+    const idx = S.clips.findIndex(c => c.id === clip.id);
+    if (idx !== -1) downloadClip(idx);
+    i++;
+    setTimeout(dl, 900);
+  };
   dl();
 }
 
