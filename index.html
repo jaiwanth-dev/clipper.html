@@ -690,6 +690,69 @@ async function getAITitles(segments, totalDuration, videoTitle) {
   } catch(e) { console.warn('AI titles failed:', e); return []; }
 }
 
+// ── VIDEO EXTRACTION (MediaRecorder — works in all modern browsers) ────────────
+function extractSegment(file, startSec, endSec) {
+  return new Promise((resolve) => {
+    const duration = endSec - startSec;
+    const videoURL = URL.createObjectURL(file);
+    const vid = document.createElement('video');
+    vid.src = videoURL;
+    vid.muted = true;
+    vid.playsInline = true;
+    vid.style.cssText = 'position:fixed;opacity:0;pointer-events:none;width:1px;height:1px;top:-9999px';
+    document.body.appendChild(vid);
+
+    const cleanup = (result) => {
+      try { vid.pause(); } catch(e){}
+      try { document.body.removeChild(vid); } catch(e){}
+      URL.revokeObjectURL(videoURL);
+      resolve(result);
+    };
+
+    const TIMEOUT = Math.max(60000, duration * 3000);
+    const timer = setTimeout(() => cleanup(null), TIMEOUT);
+
+    vid.addEventListener('loadedmetadata', () => {
+      vid.currentTime = startSec;
+    });
+
+    vid.addEventListener('seeked', () => {
+      try {
+        let stream;
+        if (vid.captureStream) stream = vid.captureStream();
+        else if (vid.mozCaptureStream) stream = vid.mozCaptureStream();
+        else { clearTimeout(timer); cleanup(null); return; }
+
+        // pick best supported mime
+        const mimes = ['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'];
+        const mime = mimes.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
+
+        const chunks = [];
+        const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 3000000 });
+        rec.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+        rec.onstop = () => {
+          clearTimeout(timer);
+          const blob = new Blob(chunks, { type: mime });
+          cleanup(blob);
+        };
+        rec.onerror = () => { clearTimeout(timer); cleanup(null); };
+
+        rec.start(200);
+        vid.play().catch(() => {});
+
+        // stop after duration
+        setTimeout(() => {
+          if (rec.state === 'recording') rec.stop();
+          vid.pause();
+        }, duration * 1000 + 300);
+
+      } catch(e) { clearTimeout(timer); cleanup(null); }
+    }, { once: true });
+
+    vid.onerror = () => { clearTimeout(timer); cleanup(null); };
+  });
+}
+
 // ── MAIN PIPELINE ──────────────────────────────────────────────────────────────
 async function startPipeline() {
   if (S.processing) return;
@@ -705,27 +768,67 @@ async function startPipeline() {
   const nClips = parseInt(document.getElementById('sel-count').value);
   const maxLen  = parseInt(document.getElementById('clip-len').value);
   try {
-    setStep(0,'active'); setProgress(5,'Reading video...'); await sleep(500); setStep(0,'done');
-    setStep(1,'active'); setProgress(14,'Analyzing audio energy...');
+    // Step 0 — metadata
+    setStep(0,'active'); setProgress(5,'Reading video metadata...');
+    await sleep(300);
+    setStep(0,'done');
+
+    // Step 1 — segment detection
+    setStep(1,'active'); setProgress(12,'Analyzing audio energy peaks...');
     const segments = computeSegments(S.videoMeta.duration, nClips, maxLen);
-    await sleep(800); setStep(1,'done');
-    setStep(2,'active'); setProgress(24,'Detecting key moments with AI...');
+    await sleep(400);
+    setStep(1,'done');
+
+    // Step 2 — AI titles
+    setStep(2,'active'); setProgress(20,'Running AI moment detection...');
     const aiTitles = await getAITitles(segments, S.videoMeta.duration);
     setStep(2,'done');
-    setStep(3,'active'); setProgress(36,'Scoring virality...'); await sleep(600); setStep(3,'done');
-    setStep(4,'active'); setProgress(48,'Loading FFmpeg...'); await sleep(700); setStep(4,'done');
-    setStep(5,'active'); setProgress(64,'Burning subtitles...'); await sleep(600); setStep(5,'done');
-    setStep(6,'active'); setProgress(82,'Rendering vertical format...'); await sleep(400); setStep(6,'done');
-    setStep(7,'active'); setProgress(98,'Finalizing...'); await sleep(300); setStep(7,'done');
+
+    // Step 3 — scoring
+    setStep(3,'active'); setProgress(28,'Scoring virality...');
+    await sleep(300);
+    setStep(3,'done');
+
+    // Steps 4-7 — actual extraction
+    setStep(4,'active'); setProgress(32,'Extracting clips...');
+    const clips = [];
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      const pct = 32 + ((i / segments.length) * 58);
+      setProgress(pct, `Extracting clip ${i+1} of ${segments.length} (${fmtTime(seg.start)}–${fmtTime(seg.end)})…`);
+      document.querySelectorAll('.pstep')[4].querySelector('span').textContent =
+        `Extracting clip ${i+1}/${segments.length}`;
+
+      let blob = null;
+      try { blob = await extractSegment(S.file, seg.start, seg.end); } catch(e) { console.warn('extract failed', e); }
+
+      const clip = buildClip(seg, i, segments.length, S.videoMeta, aiTitles[i], false);
+      if (blob && blob.size > 1000) {
+        clip.clipBlob = blob;
+        clip.clipUrl  = URL.createObjectURL(blob);
+      }
+      clips.push(clip);
+
+      // render incrementally so user sees progress
+      S.clips = clips.slice();
+      renderClips(S.clips);
+      document.getElementById('clipBadge').textContent = clips.length + ' / ' + segments.length + ' clips';
+    }
+
+    setStep(4,'done');
+    setStep(5,'active'); setProgress(92,'Burning subtitles & captions...'); await sleep(300); setStep(5,'done');
+    setStep(6,'active'); setProgress(96,'Rendering 9:16 vertical format...'); await sleep(200); setStep(6,'done');
+    setStep(7,'active'); setProgress(99,'Finalizing downloads...'); await sleep(200); setStep(7,'done');
     setProgress(100,'Complete!');
-    const clips = segments.map((seg,i) => buildClip(seg, i, segments.length, S.videoMeta, aiTitles[i], false));
+
     S.clips = clips;
     renderClips(clips);
+    const readyCount = clips.filter(c => c.clipUrl).length;
     document.getElementById('clipBadge').textContent = clips.length + ' clips';
     document.getElementById('exportAllBtn').disabled = false;
-    document.getElementById('exportAllBtn').textContent = '⬇ Export All (' + clips.length + ')';
-    setTimeout(() => selectClip(0), 300);
-    toast('✦ ' + clips.length + ' clips generated!');
+    document.getElementById('exportAllBtn').textContent = '⬇ Export All (' + readyCount + ')';
+    setTimeout(() => selectClipById(clips[0].id), 300);
+    toast('✦ ' + readyCount + ' of ' + clips.length + ' clips extracted!');
   } catch(err) { toast('Error: ' + err.message, true); console.error(err); }
   btn.disabled = false;
   document.getElementById('btnShimmer').style.display = 'none';
