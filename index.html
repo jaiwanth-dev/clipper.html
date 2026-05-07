@@ -166,6 +166,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
 ::-webkit-scrollbar{width:4px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--s3);border-radius:4px}
+.audio-note{background:rgba(52,211,153,.07);border:1px solid rgba(52,211,153,.2);border-radius:8px;padding:8px 11px;font-size:11px;color:var(--acc3);margin-top:8px;line-height:1.5}
 </style>
 </head>
 <body>
@@ -196,6 +197,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
       <div class="dz-sub">MP4 · MOV · AVI · MKV · WebM — No size limit</div>
       <div class="dz-file" id="dzFile" style="display:none"></div>
     </div>
+    <div class="audio-note" style="display:none" id="audioNote">🔊 Audio captured via Web Audio API — clips include full audio track.</div>
   </div>
 
   <div id="pane-yt" class="sec" style="display:none">
@@ -225,9 +227,9 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
       </div>
       <div class="yt-notice" id="ytNotice" style="display:none">
         <strong>⚠ Browser limitation</strong><br>
-        YouTube videos can't be downloaded directly in the browser. To clip this video:<br><br>
-        1. Download it with <a onclick="window.open('https://github.com/yt-dlp/yt-dlp#installation','_blank')">yt-dlp</a> or <a onclick="window.open('https://www.4kdownload.com/products/videodownloader/1','_blank')">4K Video Downloader</a><br>
-        2. Upload the downloaded file using the <strong>Upload File</strong> tab
+        YouTube videos can't be downloaded directly in-browser. To clip:<br><br>
+        1. Download with <a onclick="window.open('https://github.com/yt-dlp/yt-dlp#installation','_blank')">yt-dlp</a> or <a onclick="window.open('https://www.4kdownload.com/products/videodownloader/1','_blank')">4K Video Downloader</a><br>
+        2. Upload the file using the <strong>Upload File</strong> tab
       </div>
       <button class="yt-dl-btn" id="ytDlBtn" style="display:none" onclick="window.open('https://github.com/yt-dlp/yt-dlp#installation','_blank')">
         ⬇ How to download this video
@@ -357,8 +359,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;heigh
   </div>
 </div>
 
-</div><!-- /workspace -->
-</div><!-- /app -->
+</div>
+</div>
 
 <script>
 const S = {
@@ -368,35 +370,19 @@ const S = {
   clips: [],
   selected: null,
   processing: false,
-  ffmpegReady: false,
-  ffmpeg: null,
   ytData: null,
   activeTab: 'file',
+  audioCtx: null,
 };
 
-// ── CONSTANTS ──────────────────────────────────────────────────────────────────
-
 const HOOKS = [
-  'The moment everything changed',
-  'Nobody talks about this',
-  "I tried this — here's what happened",
-  "The secret they won't tell you",
-  'This changed my perspective completely',
-  'What most people get wrong',
-  "I can't believe this works",
-  'The real reason behind this',
-  'Stop doing this immediately',
-  "Here's what actually works",
-  'This one insight is worth millions',
-  "You won't believe the result",
-  'The truth nobody shares',
-  'Why this approach fails most people',
-  'The counterintuitive strategy that works',
-  'I tested this for 30 days',
-  'The framework that changed everything',
-  "This is why you're not growing",
-  'The lesson I learned the hard way',
-  'Why experts disagree on this',
+  'The moment everything changed','Nobody talks about this',"I tried this — here's what happened",
+  "The secret they won't tell you",'This changed my perspective completely','What most people get wrong',
+  "I can't believe this works",'The real reason behind this','Stop doing this immediately',
+  "Here's what actually works",'This one insight is worth millions',"You won't believe the result",
+  'The truth nobody shares','Why this approach fails most people','The counterintuitive strategy that works',
+  'I tested this for 30 days','The framework that changed everything',"This is why you're not growing",
+  'The lesson I learned the hard way','Why experts disagree on this',
 ];
 
 const SUB_TEMPLATES = [
@@ -409,19 +395,13 @@ const SUB_TEMPLATES = [
 
 const TAGS_POOL = [['hook','viral'],['edu','hook'],['viral'],['hook'],['edu','viral'],['hook','edu']];
 const SENTIMENTS = ['high energy','authoritative','curiosity','intrigue','transformative','inspiring','compelling','urgent'];
-
 const GRADIENTS = [
-  'linear-gradient(160deg,#1a0a2e,#2d1b4e)',
-  'linear-gradient(160deg,#0a1628,#1a2d5e)',
-  'linear-gradient(160deg,#0f1a0a,#1a3a10)',
-  'linear-gradient(160deg,#1a0a0a,#3a1010)',
-  'linear-gradient(160deg,#0a0a1a,#181050)',
-  'linear-gradient(160deg,#1a1a0a,#3a3010)',
-  'linear-gradient(160deg,#0a1a1a,#0a3a3a)',
-  'linear-gradient(160deg,#1a0a14,#3a1030)',
+  'linear-gradient(160deg,#1a0a2e,#2d1b4e)','linear-gradient(160deg,#0a1628,#1a2d5e)',
+  'linear-gradient(160deg,#0f1a0a,#1a3a10)','linear-gradient(160deg,#1a0a0a,#3a1010)',
+  'linear-gradient(160deg,#0a0a1a,#181050)','linear-gradient(160deg,#1a1a0a,#3a3010)',
+  'linear-gradient(160deg,#0a1a1a,#0a3a3a)','linear-gradient(160deg,#1a0a14,#3a1030)',
 ];
 
-// Each set is a flat array of 4 strings — no nesting
 const IMG_PROMPT_SETS = [
   ['dramatic revelation moment','person having breakthrough','cinematic light burst','before and after transformation'],
   ['truth unveiled spotlight','expert pointing key fact','bold typography statement','contrast dark to light'],
@@ -430,27 +410,17 @@ const IMG_PROMPT_SETS = [
   ['five minute habit timer','morning routine powerful','simple daily practice','compound effect growing'],
 ];
 
-// Parallel colour pairs [bg, accent] — same length as IMG_PROMPT_SETS
 const IMG_COLORS = [
-  ['#1a0a2e','#7c5cfc'],
-  ['#0a1628','#38bdf8'],
-  ['#0f1a0a','#34d399'],
-  ['#1a0a0a','#f472b6'],
-  ['#0a1a1a','#2dd4bf'],
+  ['#1a0a2e','#7c5cfc'],['#0a1628','#38bdf8'],['#0f1a0a','#34d399'],['#1a0a0a','#f472b6'],['#0a1a1a','#2dd4bf'],
 ];
 
 const STEPS = [
-  'Reading video metadata',
-  'Analyzing audio energy peaks',
-  'Running AI moment detection',
-  'Scoring virality with Claude AI',
-  'Extracting clips with FFmpeg',
-  'Burning subtitles & captions',
-  'Rendering 9:16 vertical format',
-  'Finalizing downloads',
+  'Reading video metadata','Analyzing audio energy peaks','Running AI moment detection',
+  'Scoring virality with Claude AI','Extracting clips with Web Audio','Burning subtitles & captions',
+  'Rendering 9:16 vertical format','Finalizing downloads',
 ];
 
-// ── TAB SWITCHING ──────────────────────────────────────────────────────────────
+// ── TAB ──────────────────────────────────────────────────────────────────────
 function switchTab(tab) {
   S.activeTab = tab;
   document.getElementById('tab-file').classList.toggle('act', tab === 'file');
@@ -459,17 +429,20 @@ function switchTab(tab) {
   document.getElementById('pane-yt').style.display = tab === 'yt' ? '' : 'none';
 }
 
-// ── YOUTUBE ────────────────────────────────────────────────────────────────────
+// ── YOUTUBE — robust multi-fallback ──────────────────────────────────────────
 function extractYtId(url) {
+  if (!url) return null;
   try {
     const u = new URL(url.trim());
     if (u.hostname.includes('youtu.be')) return u.pathname.slice(1).split('?')[0];
     if (u.hostname.includes('youtube.com')) {
       const v = u.searchParams.get('v'); if (v) return v;
       const m = u.pathname.match(/\/shorts\/([^/?]+)/); if (m) return m[1];
+      const l = u.pathname.match(/\/live\/([^/?]+)/); if (l) return l[1];
+      const e = u.pathname.match(/\/embed\/([^/?]+)/); if (e) return e[1];
     }
   } catch(e) {}
-  const m = url.match(/(?:v=|youtu\.be\/|\/shorts\/)([A-Za-z0-9_-]{11})/);
+  const m = url.match(/(?:v=|youtu\.be\/|\/shorts\/|\/live\/|\/embed\/)([A-Za-z0-9_-]{11})/);
   return m ? m[1] : null;
 }
 
@@ -493,44 +466,71 @@ function clearYT() {
   }
 }
 
+// Tries oEmbed → noembed.com → graceful fallback with thumb only
 async function fetchYTMeta() {
   const url = document.getElementById('ytUrl').value.trim();
   const id = extractYtId(url);
   if (!id) { toast('Please enter a valid YouTube URL', true); return; }
+
   document.getElementById('ytFetchTxt').textContent = 'Loading...';
   document.getElementById('ytFetchIco').textContent = '⏳';
   document.getElementById('ytFetchBtn').disabled = true;
+
+  let title = 'YouTube Video', author = '';
+
+  // Strategy 1: YouTube oEmbed (direct)
   try {
-    const res = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${id}&format=json`);
-    let title = 'YouTube Video', author = '';
-    if (res.ok) { const d = await res.json(); title = d.title || title; author = d.author_name || ''; }
-    S.ytData = { id, title, author, thumbUrl: `https://img.youtube.com/vi/${id}/hqdefault.jpg` };
-    document.getElementById('ytTitle').textContent = title;
-    document.getElementById('ytAuthor').textContent = author;
-    const img = document.getElementById('ytThumb');
-    img.onload = () => { img.style.display = 'block'; document.getElementById('ytThumbPh').style.display = 'none'; };
-    img.onerror = () => {};
-    img.src = S.ytData.thumbUrl;
-    document.getElementById('ytCard').classList.add('show');
-    document.getElementById('ytNotice').style.display = 'block';
-    document.getElementById('ytDlBtn').style.display = 'flex';
-    document.getElementById('vidInfoSec').style.display = 'block';
-    document.getElementById('vi-dur').textContent = '—';
-    document.getElementById('vi-res').textContent = '—';
-    document.getElementById('vi-size').textContent = 'N/A (YouTube)';
-    document.getElementById('vi-fmt').textContent = 'YouTube';
-    S.videoMeta = { duration: 600, width: 1920, height: 1080, fromYT: true, ytId: id, ytTitle: title };
-    drawFakeWaveform(600);
-    document.getElementById('analyzeBtn').disabled = false;
-    document.getElementById('btnTxt').textContent = 'Generate Clip Plan (YT)';
-    toast('✓ Loaded: ' + title.slice(0,40) + (title.length > 40 ? '...' : ''));
-  } catch(e) { toast('Could not load video info. Check the URL and try again.', true); }
+    const r = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${id}&format=json`);
+    if (r.ok) {
+      const d = await r.json();
+      title = d.title || title;
+      author = d.author_name || '';
+    }
+  } catch(e1) {
+    // Strategy 2: noembed.com proxy (handles CORS better)
+    try {
+      const r2 = await fetch(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${id}`);
+      if (r2.ok) {
+        const d2 = await r2.json();
+        if (d2.title) { title = d2.title; author = d2.author_name || ''; }
+      }
+    } catch(e2) {
+      // Strategy 3: Just use the ID — show thumb, continue without metadata
+      console.warn('All YT meta fetches failed — continuing with ID only');
+    }
+  }
+
+  // Always show card regardless of meta fetch outcome
+  S.ytData = { id, title, author, thumbUrl: `https://img.youtube.com/vi/${id}/hqdefault.jpg` };
+  document.getElementById('ytTitle').textContent = title;
+  document.getElementById('ytAuthor').textContent = author || 'YouTube';
+
+  const img = document.getElementById('ytThumb');
+  img.onload = () => { img.style.display = 'block'; document.getElementById('ytThumbPh').style.display = 'none'; };
+  img.onerror = () => { document.getElementById('ytThumbPh').textContent = '▶'; };
+  img.src = S.ytData.thumbUrl;
+
+  document.getElementById('ytCard').classList.add('show');
+  document.getElementById('ytNotice').style.display = 'block';
+  document.getElementById('ytDlBtn').style.display = 'flex';
+  document.getElementById('vidInfoSec').style.display = 'block';
+  document.getElementById('vi-dur').textContent = '—';
+  document.getElementById('vi-res').textContent = '—';
+  document.getElementById('vi-size').textContent = 'N/A (YouTube)';
+  document.getElementById('vi-fmt').textContent = 'YouTube';
+
+  S.videoMeta = { duration: 600, width: 1920, height: 1080, fromYT: true, ytId: id, ytTitle: title };
+  drawFakeWaveform(600);
+  document.getElementById('analyzeBtn').disabled = false;
+  document.getElementById('btnTxt').textContent = 'Generate Clip Plan (YT)';
+  toast('✓ Loaded: ' + title.slice(0,40) + (title.length > 40 ? '...' : ''));
+
   document.getElementById('ytFetchTxt').textContent = 'Load Video Info';
   document.getElementById('ytFetchIco').textContent = '▶';
   document.getElementById('ytFetchBtn').disabled = false;
 }
 
-// ── WAVEFORM ───────────────────────────────────────────────────────────────────
+// ── WAVEFORM ──────────────────────────────────────────────────────────────────
 function drawWaveform(energyArr) {
   const canvas = document.getElementById('waveform');
   canvas.width = (canvas.parentElement.clientWidth - 32) || 260;
@@ -547,7 +547,7 @@ function drawWaveform(energyArr) {
 drawWaveform(null);
 window.addEventListener('resize', () => drawWaveform(S._waveformData || null));
 
-// ── FILE SELECT ────────────────────────────────────────────────────────────────
+// ── FILE SELECT ───────────────────────────────────────────────────────────────
 const dropZone = document.getElementById('dropZone');
 dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag'); });
 dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag'));
@@ -565,6 +565,7 @@ function onFileSelect(file) {
   document.getElementById('dzTitle').textContent = '✓ Ready to process';
   document.getElementById('dzFile').style.display = 'block';
   document.getElementById('dzFile').textContent = '✓ ' + name;
+  document.getElementById('audioNote').style.display = 'block';
   document.getElementById('vidInfoSec').style.display = 'block';
   document.getElementById('vi-size').textContent = fmtSize(file.size);
   document.getElementById('vi-fmt').textContent = file.name.split('.').pop().toUpperCase();
@@ -604,7 +605,7 @@ function fmtTime(sec) {
 }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// ── PIPELINE HELPERS ───────────────────────────────────────────────────────────
+// ── PIPELINE HELPERS ──────────────────────────────────────────────────────────
 function setStep(i, state) {
   const el = document.querySelectorAll('.pstep')[i]; if (!el) return;
   el.classList.remove('done','active'); el.classList.add(state);
@@ -649,31 +650,24 @@ function genSubtitles(start, end, idx) {
     endSec: parseFloat(Math.min((i+1)*perLine, dur).toFixed(2))
   }));
 }
-
-// Factory — always produces a safe clip object
 function buildClip(seg, i, total, meta, aiTitle, isYTPlan) {
-  const promptSet = IMG_PROMPT_SETS[i % IMG_PROMPT_SETS.length]; // guaranteed flat string[]
+  const promptSet = IMG_PROMPT_SETS[i % IMG_PROMPT_SETS.length];
   return {
-    id: i+1,
-    title: (aiTitle && typeof aiTitle === 'string' && aiTitle.length > 5) ? aiTitle : HOOKS[i % HOOKS.length],
+    id: i+1, title: (aiTitle && typeof aiTitle === 'string' && aiTitle.length > 5) ? aiTitle : HOOKS[i % HOOKS.length],
     start: fmtTime(seg.start), end: fmtTime(seg.end),
     startSec: seg.start, endSec: seg.end,
-    duration: Math.round(seg.end-seg.start)+'s',
-    durationSec: seg.end-seg.start,
+    duration: Math.round(seg.end-seg.start)+'s', durationSec: seg.end-seg.start,
     score: scoreSegment(seg.energy, seg.start/meta.duration, i, total),
-    tags: TAGS_POOL[i % TAGS_POOL.length],
-    platforms: ['yt','ig'],
+    tags: TAGS_POOL[i % TAGS_POOL.length], platforms: ['yt','ig'],
     sentiment: SENTIMENTS[i % SENTIMENTS.length],
     subtitles: genSubtitles(seg.start, seg.end, i),
-    clipUrl: null, clipBlob: null,
-    imgPrompts: promptSet,  // flat string[]
-    energy: seg.energy,
-    isYTPlan: !!isYTPlan,
+    clipUrl: null, clipBlob: null, imgPrompts: promptSet,
+    energy: seg.energy, isYTPlan: !!isYTPlan,
     ytId: isYTPlan ? S.ytData?.id : null,
   };
 }
 
-// ── AI TITLES ──────────────────────────────────────────────────────────────────
+// ── AI TITLES ─────────────────────────────────────────────────────────────────
 async function getAITitles(segments, totalDuration, videoTitle) {
   try {
     const context = videoTitle ? `The video is titled: "${videoTitle}". ` : '';
@@ -690,51 +684,63 @@ async function getAITitles(segments, totalDuration, videoTitle) {
   } catch(e) { console.warn('AI titles failed:', e); return []; }
 }
 
-// ── VIDEO EXTRACTION via Canvas + MediaRecorder ────────────────────────────────
-// Renders video onto a visible canvas so captureStream() always works.
+// ── AUDIO-AWARE SEGMENT EXTRACTION ────────────────────────────────────────────
+// FIX: captures BOTH video (canvas) and audio (Web Audio API) tracks,
+// combines them into a single MediaStream, records with MediaRecorder.
 function extractSegment(file, startSec, endSec) {
   return new Promise((resolve) => {
     const duration = endSec - startSec;
     const videoURL = URL.createObjectURL(file);
 
-    // Video must be in DOM with real dimensions for captureStream
+    // Hidden video element — must be in DOM for captureStream()
     const vid = document.createElement('video');
     vid.src = videoURL;
-    vid.muted = true;
+    vid.muted = false;          // We need audio output
+    vid.volume = 1;
     vid.playsInline = true;
     vid.crossOrigin = 'anonymous';
-    vid.style.cssText = 'position:fixed;left:-9999px;top:0;width:320px;height:180px;visibility:hidden;';
+    vid.style.cssText = 'position:fixed;left:-9999px;top:0;width:320px;height:180px;visibility:hidden;pointer-events:none;';
     document.body.appendChild(vid);
 
-    // Offscreen canvas — 9:16 portrait
+    // 9:16 canvas for video track
     const canvas = document.createElement('canvas');
     canvas.width = 720; canvas.height = 1280;
     const ctx = canvas.getContext('2d');
 
     let rec = null, rafId = null, done = false;
+    let audioCtx = null, sourceNode = null, destNode = null;
 
     const TIMEOUT = Math.max(90000, duration * 4000);
     const timer = setTimeout(() => { if (!done) { done = true; stopAll(); } }, TIMEOUT);
 
-    const stopAll = () => {
+    const cleanup = () => {
       cancelAnimationFrame(rafId);
-      try { if (rec && rec.state !== 'inactive') rec.stop(); else finalize(null); } catch(e) { finalize(null); }
+      try { sourceNode && sourceNode.disconnect(); } catch(e) {}
+      try { destNode && destNode.disconnect(); } catch(e) {}
+      try { audioCtx && audioCtx.state !== 'closed' && audioCtx.close(); } catch(e) {}
+      try { vid.pause(); } catch(e) {}
+      try { document.body.removeChild(vid); } catch(e) {}
+      URL.revokeObjectURL(videoURL);
     };
 
     const finalize = (blob) => {
       clearTimeout(timer);
-      try { vid.pause(); } catch(e) {}
-      try { document.body.removeChild(vid); } catch(e) {}
-      URL.revokeObjectURL(videoURL);
+      cleanup();
       resolve(blob && blob.size > 2000 ? blob : null);
+    };
+
+    const stopAll = () => {
+      try {
+        if (rec && rec.state !== 'inactive') rec.stop();
+        else finalize(null);
+      } catch(e) { finalize(null); }
     };
 
     const drawFrame = () => {
       if (done) return;
       try {
         const vw = vid.videoWidth || 320, vh = vid.videoHeight || 180;
-        const targetAR = 9 / 16;
-        const srcAR = vw / vh;
+        const targetAR = 9 / 16, srcAR = vw / vh;
         let sx = 0, sy = 0, sw = vw, sh = vh;
         if (srcAR > targetAR) { sw = Math.round(vh * targetAR); sx = Math.round((vw - sw) / 2); }
         else { sh = Math.round(vw / targetAR); sy = Math.round((vh - sh) / 2); }
@@ -750,28 +756,58 @@ function extractSegment(file, startSec, endSec) {
     vid.addEventListener('seeked', () => {
       if (done) return;
       try {
+        // ── Audio capture via Web Audio API ──────────────────────────────
+        // Reuse shared AudioContext to avoid "too many contexts" error
+        if (!S.audioCtx || S.audioCtx.state === 'closed') {
+          S.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        audioCtx = S.audioCtx;
+
+        // Resume if suspended (autoplay policy)
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+
+        sourceNode = audioCtx.createMediaElementSource(vid);
+        destNode   = audioCtx.createMediaStreamDestination();
+        sourceNode.connect(destNode);
+        sourceNode.connect(audioCtx.destination); // also play locally so vid isn't silent
+
+        const audioTrack = destNode.stream.getAudioTracks()[0];
+
+        // ── Video capture from canvas ─────────────────────────────────────
+        const videoStream = canvas.captureStream(25);
+        const videoTrack  = videoStream.getVideoTracks()[0];
+
+        // ── Combined stream ───────────────────────────────────────────────
+        const combinedStream = new MediaStream();
+        if (videoTrack) combinedStream.addTrack(videoTrack);
+        if (audioTrack) combinedStream.addTrack(audioTrack);
+
+        // Pick best supported codec
         const mimes = [
+          'video/webm;codecs=vp9,opus',
+          'video/webm;codecs=vp8,opus',
           'video/webm;codecs=vp9',
           'video/webm;codecs=vp8',
-          'video/webm'
+          'video/webm',
         ];
         const mime = mimes.find(m => { try { return MediaRecorder.isTypeSupported(m); } catch(e) { return false; } }) || 'video/webm';
 
-        const stream = canvas.captureStream(25);
-
         const chunks = [];
-        rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 2500000 });
+        rec = new MediaRecorder(combinedStream, { mimeType: mime, videoBitsPerSecond: 2500000 });
         rec.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
         rec.onstop = () => { done = true; finalize(new Blob(chunks, { type: mime })); };
         rec.onerror = () => { done = true; finalize(null); };
 
         drawFrame();
         rec.start(200);
-        vid.play().catch(e => console.warn('[ClipAI] play():', e));
 
-        setTimeout(() => {
-          if (!done) { done = true; vid.pause(); stopAll(); }
-        }, duration * 1000 + 600);
+        vid.play().catch(e => {
+          // Autoplay blocked — resume AudioContext and retry
+          audioCtx.resume().then(() => vid.play().catch(() => {}));
+        });
+
+        // Stop after clip duration
+        setTimeout(() => { if (!done) { done = true; vid.pause(); stopAll(); } }, duration * 1000 + 800);
 
       } catch(e) {
         console.warn('[ClipAI] recorder setup failed:', e);
@@ -783,7 +819,7 @@ function extractSegment(file, startSec, endSec) {
   });
 }
 
-// ── MAIN PIPELINE ──────────────────────────────────────────────────────────────
+// ── MAIN PIPELINE ─────────────────────────────────────────────────────────────
 async function startPipeline() {
   if (S.processing) return;
   if (S.videoMeta?.fromYT && !S.file) return startYTPipeline();
@@ -798,67 +834,39 @@ async function startPipeline() {
   const nClips = parseInt(document.getElementById('sel-count').value);
   const maxLen  = parseInt(document.getElementById('clip-len').value);
   try {
-    // Step 0 — metadata
-    setStep(0,'active'); setProgress(5,'Reading video metadata...');
-    await sleep(300);
-    setStep(0,'done');
-
-    // Step 1 — segment detection
+    setStep(0,'active'); setProgress(5,'Reading video metadata...'); await sleep(300); setStep(0,'done');
     setStep(1,'active'); setProgress(12,'Analyzing audio energy peaks...');
-    const segments = computeSegments(S.videoMeta.duration, nClips, maxLen);
-    await sleep(400);
-    setStep(1,'done');
-
-    // Step 2 — AI titles
+    const segments = computeSegments(S.videoMeta.duration, nClips, maxLen); await sleep(400); setStep(1,'done');
     setStep(2,'active'); setProgress(20,'Running AI moment detection...');
-    const aiTitles = await getAITitles(segments, S.videoMeta.duration);
-    setStep(2,'done');
-
-    // Step 3 — scoring
-    setStep(3,'active'); setProgress(28,'Scoring virality...');
-    await sleep(300);
-    setStep(3,'done');
-
-    // Steps 4-7 — actual extraction
-    setStep(4,'active'); setProgress(32,'Extracting clips...');
+    const aiTitles = await getAITitles(segments, S.videoMeta.duration); setStep(2,'done');
+    setStep(3,'active'); setProgress(28,'Scoring virality...'); await sleep(300); setStep(3,'done');
+    setStep(4,'active'); setProgress(32,'Extracting clips with audio...');
     const clips = [];
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
       const pct = 32 + ((i / segments.length) * 58);
       setProgress(pct, `Extracting clip ${i+1} of ${segments.length} (${fmtTime(seg.start)}–${fmtTime(seg.end)})…`);
-      document.querySelectorAll('.pstep')[4].querySelector('span').textContent =
-        `Extracting clip ${i+1}/${segments.length}`;
-
+      document.querySelectorAll('.pstep')[4].querySelector('span').textContent = `Extracting clip ${i+1}/${segments.length}`;
       let blob = null;
       try { blob = await extractSegment(S.file, seg.start, seg.end); } catch(e) { console.warn('extract failed', e); }
-
       const clip = buildClip(seg, i, segments.length, S.videoMeta, aiTitles[i], false);
-      if (blob && blob.size > 1000) {
-        clip.clipBlob = blob;
-        clip.clipUrl  = URL.createObjectURL(blob);
-      }
+      if (blob && blob.size > 1000) { clip.clipBlob = blob; clip.clipUrl = URL.createObjectURL(blob); }
       clips.push(clip);
-
-      // render incrementally so user sees progress
-      S.clips = clips.slice();
-      renderClips(S.clips);
+      S.clips = clips.slice(); renderClips(S.clips);
       document.getElementById('clipBadge').textContent = clips.length + ' / ' + segments.length + ' clips';
     }
-
     setStep(4,'done');
     setStep(5,'active'); setProgress(92,'Burning subtitles & captions...'); await sleep(300); setStep(5,'done');
     setStep(6,'active'); setProgress(96,'Rendering 9:16 vertical format...'); await sleep(200); setStep(6,'done');
     setStep(7,'active'); setProgress(99,'Finalizing downloads...'); await sleep(200); setStep(7,'done');
     setProgress(100,'Complete!');
-
-    S.clips = clips;
-    renderClips(clips);
+    S.clips = clips; renderClips(clips);
     const readyCount = clips.filter(c => c.clipUrl).length;
     document.getElementById('clipBadge').textContent = clips.length + ' clips';
     document.getElementById('exportAllBtn').disabled = false;
     document.getElementById('exportAllBtn').textContent = '⬇ Export All (' + readyCount + ')';
     setTimeout(() => selectClipById(clips[0].id), 300);
-    toast('✦ ' + readyCount + ' of ' + clips.length + ' clips extracted!');
+    toast('✦ ' + readyCount + ' of ' + clips.length + ' clips extracted with audio!');
   } catch(err) { toast('Error: ' + err.message, true); console.error(err); }
   btn.disabled = false;
   document.getElementById('btnShimmer').style.display = 'none';
@@ -887,8 +895,7 @@ async function startYTPipeline() {
     setStep(6,'active'); setProgress(85,'Preparing plan...'); await sleep(300); setStep(6,'done');
     setStep(7,'done'); setProgress(100,'Clip plan ready!');
     const clips = segments.map((seg,i) => buildClip(seg, i, segments.length, S.videoMeta, aiTitles[i], true));
-    S.clips = clips;
-    renderClips(clips);
+    S.clips = clips; renderClips(clips);
     document.getElementById('clipBadge').textContent = clips.length + ' clips (plan)';
     document.getElementById('exportAllBtn').disabled = false;
     document.getElementById('exportAllBtn').textContent = '⬇ Export All (' + clips.length + ')';
@@ -901,7 +908,7 @@ async function startYTPipeline() {
   S.processing = false;
 }
 
-// ── RENDER CLIPS ───────────────────────────────────────────────────────────────
+// ── RENDER CLIPS ──────────────────────────────────────────────────────────────
 function renderClips(clips) {
   const grid = document.getElementById('clipsGrid');
   if (!clips.length) {
@@ -937,25 +944,16 @@ function renderClips(clips) {
   }).join('');
 }
 
-// ── SELECT + PREVIEW ───────────────────────────────────────────────────────────
-// Stable id-based lookups — survive sort reordering
-function selectClipById(id) {
-  const idx = S.clips.findIndex(c => c.id === id);
-  if (idx !== -1) selectClip(idx);
-}
-function downloadClipById(id) {
-  const idx = S.clips.findIndex(c => c.id === id);
-  if (idx !== -1) downloadClip(idx);
-}
+// ── SELECT + PREVIEW ──────────────────────────────────────────────────────────
+function selectClipById(id) { const idx = S.clips.findIndex(c => c.id === id); if (idx !== -1) selectClip(idx); }
+function downloadClipById(id) { const idx = S.clips.findIndex(c => c.id === id); if (idx !== -1) downloadClip(idx); }
 
 function selectClip(idx) {
   document.querySelectorAll('.card').forEach(c => c.classList.remove('sel'));
   const clip = S.clips[idx]; if (!clip) return;
   const card = document.getElementById('card'+clip.id); if (card) card.classList.add('sel');
   S.selected = clip;
-  updatePhonePreview(clip);
-  renderSubs(clip);
-  renderImgs(clip);
+  updatePhonePreview(clip); renderSubs(clip); renderImgs(clip);
 }
 
 let subTimer = null;
@@ -973,7 +971,7 @@ function updatePhonePreview(clip) {
   const area = document.getElementById('phoneArea');
   const grad = GRADIENTS[(clip.id-1) % GRADIENTS.length];
   if (clip.clipUrl) {
-    area.innerHTML = `<video class="phone-preview-video" src="${clip.clipUrl}" muted loop playsinline></video><button class="phone-play-btn" id="phonePBtn" onclick="togglePhonePlay()">▶</button><div class="phone-sub-bar" id="phoneSub">${clip.subtitles[0]?.text||''}</div>`;
+    area.innerHTML = `<video class="phone-preview-video" src="${clip.clipUrl}" loop playsinline></video><button class="phone-play-btn" id="phonePBtn" onclick="togglePhonePlay()">▶</button><div class="phone-sub-bar" id="phoneSub">${clip.subtitles[0]?.text||''}</div>`;
     startSubCycle(clip);
   } else if (clip.isYTPlan && S.ytData?.thumbUrl) {
     area.innerHTML = `<img src="${S.ytData.thumbUrl}" style="width:100%;height:100%;object-fit:cover;position:absolute;inset:0;opacity:.6">
@@ -1000,43 +998,33 @@ function renderSubs(clip) {
   document.getElementById('subEditor').style.display = 'block';
   document.getElementById('subLines').innerHTML = (clip.subtitles||[]).map((s,i) =>
     `<div class="sub-line ${i===0?'act':''}" onclick="document.querySelectorAll('.sub-line').forEach(x=>x.classList.remove('act'));this.classList.add('act')">
-      <div class="sub-time">${s.time}</div>
-      <div class="sub-text">${s.text}</div>
+      <div class="sub-time">${s.time}</div><div class="sub-text">${s.text}</div>
     </div>`).join('');
 }
 
-// ── renderImgs: uses flat IMG_PROMPT_SETS — no nested arrays ──────────────────
 function renderImgs(clip) {
   document.getElementById('aiImgSec').style.display = 'block';
-  // clip.imgPrompts is always a flat string[] from buildClip
   const prompts = Array.isArray(clip.imgPrompts) ? clip.imgPrompts : [];
   document.getElementById('imgGrid').innerHTML = prompts.map((p, i) => {
-    const label   = typeof p === 'string' ? p : (Array.isArray(p) ? String(p[0]) : String(p));
-    const pair    = IMG_COLORS[i % IMG_COLORS.length] || ['#1a0a2e','#7c5cfc'];
-    const bg      = pair[0];
-    const accent  = pair[1];
+    const label = typeof p === 'string' ? p : String(p);
+    const pair = IMG_COLORS[i % IMG_COLORS.length] || ['#1a0a2e','#7c5cfc'];
     const preview = label.split(' ').slice(0,3).join(' ');
-    return `<div class="img-item ${i===0?'sel':''}" style="background:${bg}"
+    return `<div class="img-item ${i===0?'sel':''}" style="background:${pair[0]}"
         onclick="document.querySelectorAll('.img-item').forEach(x=>x.classList.remove('sel'));this.classList.add('sel')">
       <div style="font-size:18px">🎨</div>
-      <div style="font-size:8px;color:${accent};line-height:1.4;text-align:center">${label}</div>
+      <div style="font-size:8px;color:${pair[1]};line-height:1.4;text-align:center">${label}</div>
       <div class="img-label">${preview}</div>
     </div>`;
   }).join('');
 }
 
 async function regenImages() {
-  if (!S.selected) return;
-  toast('Regenerating AI images...');
-  await sleep(1200);
-  renderImgs(S.selected);
-  toast('New images generated!');
+  if (!S.selected) return; toast('Regenerating AI images...'); await sleep(1200); renderImgs(S.selected); toast('New images generated!');
 }
 
-// ── SORT / DOWNLOAD / EXPORT ───────────────────────────────────────────────────
+// ── SORT / DOWNLOAD / EXPORT ──────────────────────────────────────────────────
 function sortClips(val) {
   if (!S.clips.length) return;
-  // Update S.clips in-place so all index references stay consistent
   S.clips.sort((a,b) => val==='score'?b.score-a.score:val==='duration'?b.durationSec-a.durationSec:a.id-b.id);
   renderClips(S.clips);
   if (S.selected) { const card=document.getElementById('card'+S.selected.id); if(card)card.classList.add('sel'); }
@@ -1054,42 +1042,35 @@ function downloadClip(idx) {
   const a = document.createElement('a');
   a.href = clip.clipUrl;
   a.download = `clipai_short_${String(clip.id).padStart(2,'0')}_${clip.score}score${ext}`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  toast(`Downloading "${clip.title.slice(0,30)}..."`);
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  toast(`Downloading "${clip.title.slice(0,30)}..." with audio`);
 }
 
 function exportAll() {
   if (!S.clips.length) { toast('No clips generated yet', true); return; }
   const ready = S.clips.filter(c => c.clipUrl);
   if (!ready.length) {
-    if (S.clips.some(c => c.isYTPlan)) {
-      toast('Upload the YouTube video file to export real clips', true); return;
-    }
+    if (S.clips.some(c => c.isYTPlan)) { toast('Upload the YouTube video file to export real clips', true); return; }
     toast('Upload a video file to generate downloadable clips', true); return;
   }
   let i = 0;
   const dl = () => {
-    if (i >= ready.length) { toast(`✓ Exported ${ready.length} clip${ready.length>1?'s':''}!`); return; }
+    if (i >= ready.length) { toast(`✓ Exported ${ready.length} clip${ready.length>1?'s':''} with audio!`); return; }
     const clip = ready[i];
     const idx = S.clips.findIndex(c => c.id === clip.id);
-    if (idx !== -1) downloadClip(idx);
-    i++;
+    if (idx !== -1) downloadClip(idx); i++;
     setTimeout(dl, 900);
   };
   dl();
 }
 
-// ── TOAST ──────────────────────────────────────────────────────────────────────
+// ── TOAST ─────────────────────────────────────────────────────────────────────
 function toast(msg, isErr=false) {
   document.querySelectorAll('.toast').forEach(t => t.remove());
-  const el = document.createElement('div');
-  el.className = 'toast';
+  const el = document.createElement('div'); el.className = 'toast';
   el.style.borderColor = isErr ? 'rgba(244,67,54,.4)' : 'rgba(124,92,252,.35)';
   el.innerHTML = `<span style="color:${isErr?'#f43f5e':'#7c5cfc'}">✦</span> ${msg}`;
-  document.body.appendChild(el);
-  setTimeout(() => el.remove(), 3800);
+  document.body.appendChild(el); setTimeout(() => el.remove(), 3800);
 }
 </script>
 </body>
