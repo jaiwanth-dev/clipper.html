@@ -690,66 +690,96 @@ async function getAITitles(segments, totalDuration, videoTitle) {
   } catch(e) { console.warn('AI titles failed:', e); return []; }
 }
 
-// ── VIDEO EXTRACTION (MediaRecorder — works in all modern browsers) ────────────
+// ── VIDEO EXTRACTION via Canvas + MediaRecorder ────────────────────────────────
+// Renders video onto a visible canvas so captureStream() always works.
 function extractSegment(file, startSec, endSec) {
   return new Promise((resolve) => {
     const duration = endSec - startSec;
     const videoURL = URL.createObjectURL(file);
+
+    // Video must be in DOM with real dimensions for captureStream
     const vid = document.createElement('video');
     vid.src = videoURL;
     vid.muted = true;
     vid.playsInline = true;
-    vid.style.cssText = 'position:fixed;opacity:0;pointer-events:none;width:1px;height:1px;top:-9999px';
+    vid.crossOrigin = 'anonymous';
+    vid.style.cssText = 'position:fixed;left:-9999px;top:0;width:320px;height:180px;visibility:hidden;';
     document.body.appendChild(vid);
 
-    const cleanup = (result) => {
-      try { vid.pause(); } catch(e){}
-      try { document.body.removeChild(vid); } catch(e){}
-      URL.revokeObjectURL(videoURL);
-      resolve(result);
+    // Offscreen canvas — 9:16 portrait
+    const canvas = document.createElement('canvas');
+    canvas.width = 720; canvas.height = 1280;
+    const ctx = canvas.getContext('2d');
+
+    let rec = null, rafId = null, done = false;
+
+    const TIMEOUT = Math.max(90000, duration * 4000);
+    const timer = setTimeout(() => { if (!done) { done = true; stopAll(); } }, TIMEOUT);
+
+    const stopAll = () => {
+      cancelAnimationFrame(rafId);
+      try { if (rec && rec.state !== 'inactive') rec.stop(); else finalize(null); } catch(e) { finalize(null); }
     };
 
-    const TIMEOUT = Math.max(60000, duration * 3000);
-    const timer = setTimeout(() => cleanup(null), TIMEOUT);
+    const finalize = (blob) => {
+      clearTimeout(timer);
+      try { vid.pause(); } catch(e) {}
+      try { document.body.removeChild(vid); } catch(e) {}
+      URL.revokeObjectURL(videoURL);
+      resolve(blob && blob.size > 2000 ? blob : null);
+    };
+
+    const drawFrame = () => {
+      if (done) return;
+      try {
+        const vw = vid.videoWidth || 320, vh = vid.videoHeight || 180;
+        const targetAR = 9 / 16;
+        const srcAR = vw / vh;
+        let sx = 0, sy = 0, sw = vw, sh = vh;
+        if (srcAR > targetAR) { sw = Math.round(vh * targetAR); sx = Math.round((vw - sw) / 2); }
+        else { sh = Math.round(vw / targetAR); sy = Math.round((vh - sh) / 2); }
+        ctx.drawImage(vid, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+      } catch(e) {}
+      rafId = requestAnimationFrame(drawFrame);
+    };
 
     vid.addEventListener('loadedmetadata', () => {
-      vid.currentTime = startSec;
+      vid.currentTime = Math.min(startSec, vid.duration - 0.1);
     });
 
     vid.addEventListener('seeked', () => {
+      if (done) return;
       try {
-        let stream;
-        if (vid.captureStream) stream = vid.captureStream();
-        else if (vid.mozCaptureStream) stream = vid.mozCaptureStream();
-        else { clearTimeout(timer); cleanup(null); return; }
+        const mimes = [
+          'video/webm;codecs=vp9',
+          'video/webm;codecs=vp8',
+          'video/webm'
+        ];
+        const mime = mimes.find(m => { try { return MediaRecorder.isTypeSupported(m); } catch(e) { return false; } }) || 'video/webm';
 
-        // pick best supported mime
-        const mimes = ['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'];
-        const mime = mimes.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
+        const stream = canvas.captureStream(25);
 
         const chunks = [];
-        const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 3000000 });
+        rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 2500000 });
         rec.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
-        rec.onstop = () => {
-          clearTimeout(timer);
-          const blob = new Blob(chunks, { type: mime });
-          cleanup(blob);
-        };
-        rec.onerror = () => { clearTimeout(timer); cleanup(null); };
+        rec.onstop = () => { done = true; finalize(new Blob(chunks, { type: mime })); };
+        rec.onerror = () => { done = true; finalize(null); };
 
+        drawFrame();
         rec.start(200);
-        vid.play().catch(() => {});
+        vid.play().catch(e => console.warn('[ClipAI] play():', e));
 
-        // stop after duration
         setTimeout(() => {
-          if (rec.state === 'recording') rec.stop();
-          vid.pause();
-        }, duration * 1000 + 300);
+          if (!done) { done = true; vid.pause(); stopAll(); }
+        }, duration * 1000 + 600);
 
-      } catch(e) { clearTimeout(timer); cleanup(null); }
+      } catch(e) {
+        console.warn('[ClipAI] recorder setup failed:', e);
+        done = true; finalize(null);
+      }
     }, { once: true });
 
-    vid.onerror = () => { clearTimeout(timer); cleanup(null); };
+    vid.addEventListener('error', () => { done = true; clearTimeout(timer); finalize(null); });
   });
 }
 
