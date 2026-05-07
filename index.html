@@ -348,7 +348,7 @@ input[type=range]::-webkit-slider-thumb{
     <div class="drop-zone" id="dropZone">
       <input type="file" id="fileInput" accept="video/*" onchange="onFileSelect(this.files[0])">
       <div class="dz-icon">🎬</div>
-      <div class="dz-title">Drop video or click to browse</div>
+      <div class="dz-title" id="dzTitle">Drop video or click to browse</div>
       <div class="dz-sub">MP4 · MOV · AVI · MKV · WebM — No size limit</div>
       <div class="dz-file" id="dzFile" style="display:none"></div>
     </div>
@@ -744,7 +744,7 @@ function onFileSelect(file) {
   const name = file.name.length > 35 ? file.name.slice(0, 32) + '...' : file.name;
   document.getElementById('dzFile').style.display = 'block';
   document.getElementById('dzFile').textContent = '✓ ' + name;
-  document.getElementById('dzFile').previousElementSibling.previousElementSibling.previousElementSibling.textContent = '✓ Ready to process';
+  document.getElementById('dzTitle').textContent = '✓ Ready to process';
 
   document.getElementById('vidInfoSec').style.display = 'block';
   document.getElementById('vi-size').textContent = fmtSize(file.size);
